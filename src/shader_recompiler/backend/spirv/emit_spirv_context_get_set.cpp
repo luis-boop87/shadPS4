@@ -128,11 +128,7 @@ Id EmitReadConst(EmitContext& ctx) {
 
 Id EmitReadConstBuffer(EmitContext& ctx, u32 handle, Id index) {
     auto& buffer = ctx.buffers[handle];
-    if (!Sirit::ValidId(buffer.offset)) {
-        buffer.offset = ctx.GetBufferOffset(buffer.global_binding);
-    }
-    const Id offset_dwords{ctx.OpShiftRightLogical(ctx.U32[1], buffer.offset, ctx.ConstU32(2U))};
-    index = ctx.OpIAdd(ctx.U32[1], index, offset_dwords);
+    index = ctx.OpIAdd(ctx.U32[1], index, buffer.offset_dwords);
     const Id ptr{ctx.OpAccessChain(buffer.pointer_type, buffer.id, ctx.u32_zero_value, index)};
     return ctx.OpLoad(buffer.data_types->Get(1), ptr);
 }
@@ -218,6 +214,9 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
 }
 
 void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 element) {
+    if (attr == IR::Attribute::Position1) {
+        return;
+    }
     const Id pointer{OutputAttrPointer(ctx, attr, element)};
     ctx.OpStore(pointer, ctx.OpBitcast(ctx.F32[1], value));
 }
@@ -229,9 +228,6 @@ Id EmitLoadBufferU32(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
 template <u32 N>
 static Id EmitLoadBufferF32xN(EmitContext& ctx, u32 handle, Id address) {
     auto& buffer = ctx.buffers[handle];
-    if (!Sirit::ValidId(buffer.offset)) {
-        buffer.offset = ctx.GetBufferOffset(buffer.global_binding);
-    }
     address = ctx.OpIAdd(ctx.U32[1], address, buffer.offset);
     const Id index = ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.ConstU32(2u));
     if constexpr (N == 1) {
@@ -326,7 +322,7 @@ static Id ComponentOffset(EmitContext& ctx, Id address, u32 stride, u32 bit_offs
 
 static Id GetBufferFormatValue(EmitContext& ctx, u32 handle, Id address, u32 comp) {
     auto& buffer = ctx.buffers[handle];
-    const auto format = buffer.buffer.GetDataFmt();
+    const auto format = buffer.dmft;
     switch (format) {
     case AmdGpu::DataFormat::FormatInvalid:
         return ctx.f32_zero_value;
@@ -351,7 +347,7 @@ static Id GetBufferFormatValue(EmitContext& ctx, u32 handle, Id address, u32 com
 
         // uint index = address / 4;
         Id index = ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.ConstU32(2u));
-        const u32 stride = buffer.buffer.GetStride();
+        const u32 stride = buffer.stride;
         if (stride > 4) {
             const u32 index_offset = u32(AmdGpu::ComponentOffset(format, comp) / 32);
             if (index_offset > 0) {
@@ -363,7 +359,7 @@ static Id GetBufferFormatValue(EmitContext& ctx, u32 handle, Id address, u32 com
 
         const u32 bit_offset = AmdGpu::ComponentOffset(format, comp) % 32;
         const u32 bit_width = AmdGpu::ComponentBits(format, comp);
-        const auto num_format = buffer.buffer.GetNumberFmt();
+        const auto num_format = buffer.nfmt;
         if (num_format == AmdGpu::NumberFormat::Float) {
             if (bit_width == 32) {
                 return ctx.OpLoad(ctx.F32[1], ptr);
@@ -386,19 +382,12 @@ static Id GetBufferFormatValue(EmitContext& ctx, u32 handle, Id address, u32 com
                 if (is_signed) {
                     value = ctx.OpBitFieldSExtract(ctx.S32[1], value, comp_offset,
                                                    ctx.ConstU32(bit_width));
-                    value = ctx.OpConvertSToF(ctx.F32[1], value);
                 } else {
                     value = ctx.OpBitFieldUExtract(ctx.U32[1], value, comp_offset,
                                                    ctx.ConstU32(bit_width));
-                    value = ctx.OpConvertUToF(ctx.F32[1], value);
-                }
-            } else {
-                if (is_signed) {
-                    value = ctx.OpConvertSToF(ctx.F32[1], value);
-                } else {
-                    value = ctx.OpConvertUToF(ctx.F32[1], value);
                 }
             }
+            value = ctx.OpBitcast(ctx.F32[1], value);
             return ConvertValue(ctx, value, num_format, bit_width);
         }
         break;
@@ -411,9 +400,6 @@ static Id GetBufferFormatValue(EmitContext& ctx, u32 handle, Id address, u32 com
 template <u32 N>
 static Id EmitLoadBufferFormatF32xN(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address) {
     auto& buffer = ctx.buffers[handle];
-    if (!Sirit::ValidId(buffer.offset)) {
-        buffer.offset = ctx.GetBufferOffset(buffer.global_binding);
-    }
     address = ctx.OpIAdd(ctx.U32[1], address, buffer.offset);
     if constexpr (N == 1) {
         return GetBufferFormatValue(ctx, handle, address, 0);
@@ -445,9 +431,6 @@ Id EmitLoadBufferFormatF32x4(EmitContext& ctx, IR::Inst* inst, u32 handle, Id ad
 template <u32 N>
 static void EmitStoreBufferF32xN(EmitContext& ctx, u32 handle, Id address, Id value) {
     auto& buffer = ctx.buffers[handle];
-    if (!Sirit::ValidId(buffer.offset)) {
-        buffer.offset = ctx.GetBufferOffset(buffer.global_binding);
-    }
     address = ctx.OpIAdd(ctx.U32[1], address, buffer.offset);
     const Id index = ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.ConstU32(2u));
     if constexpr (N == 1) {

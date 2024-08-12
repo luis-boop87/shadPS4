@@ -92,6 +92,7 @@ struct ImageResource {
     u32 dword_offset;
     AmdGpu::ImageType type;
     AmdGpu::NumberFormat nfmt;
+    bool is_atomic;
     bool is_storage;
     bool is_depth;
 };
@@ -116,7 +117,7 @@ struct PushData {
     std::array<u8, 32> buf_offsets;
 
     void AddOffset(u32 binding, u32 offset) {
-        ASSERT(offset < 64 && binding < 32);
+        ASSERT(offset < 256 && binding < buf_offsets.size());
         buf_offsets[binding] = offset;
     }
 };

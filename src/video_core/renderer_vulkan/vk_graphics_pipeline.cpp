@@ -145,6 +145,9 @@ GraphicsPipeline::GraphicsPipeline(const Instance& instance_, Scheduler& schedul
         dynamic_states.push_back(vk::DynamicState::eColorWriteEnableEXT);
         dynamic_states.push_back(vk::DynamicState::eColorWriteMaskEXT);
     }
+    if (instance.IsVertexInputDynamicState()) {
+        dynamic_states.push_back(vk::DynamicState::eVertexInputEXT);
+    }
 
     const vk::PipelineDynamicStateCreateInfo dynamic_info = {
         .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
@@ -351,6 +354,9 @@ void GraphicsPipeline::BindResources(const Liverpool::Regs& regs,
                     LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a PS shader (buffer)");
                 }
                 const u32 size = vsharp.GetSize();
+                if (buffer.is_written) {
+                    texture_cache.InvalidateMemory(address, size, true);
+                }
                 const u32 alignment = buffer.is_storage ? instance.StorageMinAlignment()
                                                         : instance.UniformMinAlignment();
                 const auto [vk_buffer, offset] =
@@ -401,6 +407,9 @@ void GraphicsPipeline::BindResources(const Liverpool::Regs& regs,
         }
         for (const auto& sampler : stage.samplers) {
             auto ssharp = sampler.GetSsharp(stage);
+            if (ssharp.force_degamma) {
+                LOG_WARNING(Render_Vulkan, "Texture requires gamma correction");
+            }
             if (sampler.disable_aniso) {
                 const auto& tsharp = tsharps[sampler.associated_image];
                 if (tsharp.base_level == 0 && tsharp.last_level == 0) {

@@ -115,7 +115,7 @@ bool ComputePipeline::BindResources(VideoCore::BufferCache& buffer_cache,
         }
         const u32 size = vsharp.GetSize();
         if (buffer.is_written) {
-            texture_cache.InvalidateMemory(address, size);
+            texture_cache.InvalidateMemory(address, size, true);
         }
         const u32 alignment =
             buffer.is_storage ? instance.StorageMinAlignment() : instance.UniformMinAlignment();
@@ -164,6 +164,9 @@ bool ComputePipeline::BindResources(VideoCore::BufferCache& buffer_cache,
     }
     for (const auto& sampler : info.samplers) {
         const auto ssharp = sampler.GetSsharp(info);
+        if (ssharp.force_degamma) {
+            LOG_WARNING(Render_Vulkan, "Texture requires gamma correction");
+        }
         const auto vk_sampler = texture_cache.GetSampler(ssharp);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         set_writes.push_back({

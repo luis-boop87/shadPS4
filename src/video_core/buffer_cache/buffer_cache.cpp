@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <xxhash.h>
 #include "common/alignment.h"
 #include "common/scope_exit.h"
 #include "shader_recompiler/runtime_info.h"
@@ -42,6 +43,15 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
         // Page has not been modified by the GPU, nothing to do.
         return;
     }
+    // Add gpu modified hashes to the list to avoid reuploading if necessary.
+    gpu_modified_regions.ForEachInRange(device_addr, size, [&](VAddr range_start, VAddr range_end) {
+        const u8* addr = std::bit_cast<const u8*>(range_start);
+        const size_t size = range_end - range_start;
+        const u64 hash = XXH3_64bits(addr, size);
+        gpu_region_hashes.Add(range_start, size, hash);
+        LOG_WARNING(Render_Vulkan, "Hashing gpu region addr = {:#x}, size = {:#x}, hash = {:#x}",
+                    range_start, size, hash);
+    });
 }
 
 void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 size) {
@@ -87,6 +97,14 @@ void BufferCache::DownloadBufferMemory(Buffer& buffer, VAddr device_addr, u64 si
 }
 
 bool BufferCache::BindVertexBuffers(const Shader::Info& vs_info) {
+    boost::container::small_vector<vk::VertexInputAttributeDescription2EXT, 16> attributes;
+    boost::container::small_vector<vk::VertexInputBindingDescription2EXT, 16> bindings;
+    SCOPE_EXIT {
+        if (instance.IsVertexInputDynamicState()) {
+            scheduler.CommandBuffer().setVertexInputEXT(bindings, attributes);
+        }
+    };
+
     if (vs_info.vs_inputs.empty()) {
         return false;
     }
@@ -122,6 +140,21 @@ bool BufferCache::BindVertexBuffers(const Shader::Info& vs_info) {
         }
         guest_buffers.emplace_back(buffer);
         ranges.emplace_back(buffer.base_address, buffer.base_address + buffer.GetSize());
+        attributes.push_back({
+            .location = input.binding,
+            .binding = input.binding,
+            .format =
+                Vulkan::LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt()),
+            .offset = 0,
+        });
+        bindings.push_back({
+            .binding = input.binding,
+            .stride = buffer.GetStride(),
+            .inputRate = input.instance_step_rate == Shader::Info::VsInput::None
+                             ? vk::VertexInputRate::eVertex
+                             : vk::VertexInputRate::eInstance,
+            .divisor = 1,
+        });
     }
 
     std::ranges::sort(ranges, [](const BufferRange& lhv, const BufferRange& rhv) {
@@ -159,8 +192,8 @@ bool BufferCache::BindVertexBuffers(const Shader::Info& vs_info) {
         host_offsets[i] = host_buffer->offset + buffer.base_address - host_buffer->base_address;
     }
 
+    const auto cmdbuf = scheduler.CommandBuffer();
     if (num_buffers > 0) {
-        const auto cmdbuf = scheduler.CommandBuffer();
         cmdbuf.bindVertexBuffers(0, num_buffers, host_buffers.data(), host_offsets.data());
     }
 
@@ -207,8 +240,8 @@ u32 BufferCache::BindIndexBuffer(bool& is_indexed, u32 index_offset) {
 std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, bool is_written) {
     std::scoped_lock lk{mutex};
     static constexpr u64 StreamThreshold = CACHING_PAGESIZE;
-    const bool is_gpu_dirty = memory_tracker.IsRegionGpuModified(device_addr, size);
-    if (!is_written && size < StreamThreshold && !is_gpu_dirty) {
+    const bool is_gpu_dirty = IsRegionGpuModified(device_addr, size);
+    if (!is_written && size <= StreamThreshold && !is_gpu_dirty) {
         // For small uniform buffers that have not been modified by gpu
         // use device local stream buffer to reduce renderpass breaks.
         const u64 offset = stream_buffer.Copy(device_addr, size, instance.UniformMinAlignment());
@@ -220,8 +253,22 @@ std::pair<Buffer*, u32> BufferCache::ObtainBuffer(VAddr device_addr, u32 size, b
     SynchronizeBuffer(buffer, device_addr, size);
     if (is_written) {
         memory_tracker.MarkRegionAsGpuModified(device_addr, size);
+        gpu_modified_regions.Add(device_addr, size);
     }
     return {&buffer, buffer.Offset(device_addr)};
+}
+
+std::pair<const Buffer*, u32> BufferCache::ObtainTempBuffer(VAddr gpu_addr, u32 size) {
+    const u64 page = gpu_addr >> CACHING_PAGEBITS;
+    const BufferId buffer_id = page_table[page];
+    if (!buffer_id) {
+        return {nullptr, 0};
+    }
+    const Buffer& buffer = slot_buffers[buffer_id];
+    if (buffer.IsInBounds(gpu_addr, size)) {
+        return {&buffer, buffer.Offset(gpu_addr)};
+    }
+    return {nullptr, 0};
 }
 
 bool BufferCache::IsRegionRegistered(VAddr addr, size_t size) {
@@ -246,6 +293,12 @@ bool BufferCache::IsRegionRegistered(VAddr addr, size_t size) {
 
 bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
     return memory_tracker.IsRegionCpuModified(addr, size);
+}
+
+bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
+    bool is_dirty = false;
+    gpu_modified_regions.ForEachInRange(addr, size, [&](VAddr, VAddr) { is_dirty = true; });
+    return is_dirty;
 }
 
 BufferId BufferCache::FindBuffer(VAddr device_addr, u32 size) {
@@ -432,10 +485,25 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, VAddr device_addr, u32 size)
         total_size_bytes += range_size;
         largest_copy = std::max(largest_copy, range_size);
     };
+    const auto add_copy_checked = [&](VAddr region_addr, size_t size, u64 hash) {
+        const u8* addr = std::bit_cast<const u8*>(region_addr);
+        const u64 new_hash = XXH3_64bits(addr, size);
+        LOG_WARNING(
+            Render_Vulkan,
+            "Checking gpu region addr = {:#x}, size = {:#x}, hash = {:#x}, new_hash = {:#x}",
+            region_addr, size, hash, new_hash);
+        // If the region hash changed add the copy to remove gpu modified region.
+        if (new_hash != hash) {
+            add_copy(region_addr, size);
+            gpu_modified_regions.Subtract(region_addr, size);
+            return true;
+        }
+        return false;
+    };
     memory_tracker.ForEachUploadRange(device_addr, size, [&](u64 device_addr_out, u64 range_size) {
-        add_copy(device_addr_out, range_size);
         // Prevent uploading to gpu modified regions.
-        // gpu_modified_ranges.ForEachNotInRange(device_addr_out, range_size, add_copy);
+        gpu_region_hashes.ForEachBothRanges(device_addr_out, range_size, add_copy_checked,
+                                            add_copy);
     });
     if (total_size_bytes == 0) {
         return true;

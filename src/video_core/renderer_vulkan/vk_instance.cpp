@@ -8,6 +8,7 @@
 #include <fmt/ranges.h>
 
 #include "common/assert.h"
+#include "common/config.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -201,6 +202,8 @@ bool Instance::CreateDevice() {
     add_extension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     workgroup_memory_explicit_layout =
         add_extension(VK_KHR_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_EXTENSION_NAME);
+    vertex_input_dynamic_state = add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+
     // The next two extensions are required to be available together in order to support write masks
     color_write_en = add_extension(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
     color_write_en &= add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
@@ -213,6 +216,13 @@ bool Instance::CreateDevice() {
     add_extension(VK_KHR_MAINTENANCE_4_EXTENSION_NAME);
     add_extension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
     add_extension(VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME);
+    const bool has_sync2 = add_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+
+    if (has_sync2) {
+        has_nv_checkpoints = Config::isMarkersEnabled()
+                                 ? add_extension(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME)
+                                 : false;
+    }
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
@@ -308,6 +318,12 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceRobustness2FeaturesEXT{
             .nullDescriptor = true,
         },
+        vk::PhysicalDeviceSynchronization2Features{
+            .synchronization2 = has_sync2,
+        },
+        vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{
+            .vertexInputDynamicState = true,
+        },
     };
 
     if (!color_write_en) {
@@ -316,6 +332,9 @@ bool Instance::CreateDevice() {
     }
     if (!robustness) {
         device_chain.unlink<vk::PhysicalDeviceRobustness2FeaturesEXT>();
+    }
+    if (!vertex_input_dynamic_state) {
+        device_chain.unlink<vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT>();
     }
 
     try {

@@ -150,10 +150,8 @@ bool IsImageInstruction(const IR::Inst& inst) {
     }
 }
 
-bool IsImageStorageInstruction(const IR::Inst& inst) {
+bool IsAtomicImageInstruction(const IR::Inst& inst) {
     switch (inst.GetOpcode()) {
-    case IR::Opcode::ImageWrite:
-    case IR::Opcode::ImageRead:
     case IR::Opcode::ImageAtomicIAdd32:
     case IR::Opcode::ImageAtomicSMin32:
     case IR::Opcode::ImageAtomicUMin32:
@@ -168,6 +166,16 @@ bool IsImageStorageInstruction(const IR::Inst& inst) {
         return true;
     default:
         return false;
+    }
+}
+
+bool IsImageStorageInstruction(const IR::Inst& inst) {
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::ImageWrite:
+    case IR::Opcode::ImageRead:
+        return true;
+    default:
+        return IsAtomicImageInstruction(inst);
     }
 }
 
@@ -194,9 +202,11 @@ public:
     u32 Add(const ImageResource& desc) {
         const u32 index{Add(image_resources, desc, [&desc](const auto& existing) {
             return desc.sgpr_base == existing.sgpr_base &&
-                   desc.dword_offset == existing.dword_offset && desc.type == existing.type &&
-                   desc.is_storage == existing.is_storage;
+                   desc.dword_offset == existing.dword_offset && desc.type == existing.type;
         })};
+        auto& image = image_resources[index];
+        image.is_atomic |= desc.is_atomic;
+        image.is_storage |= desc.is_storage;
         return index;
     }
 
@@ -376,9 +386,11 @@ s32 TryHandleInlineCbuf(IR::Inst& inst, Info& info, Descriptors& descriptors,
         return -1;
     }
     // We have found this pattern. Build the sharp.
-    std::array<u64, 2> buffer;
+    std::array<u32, 4> buffer;
     buffer[0] = info.pgm_base + p0->Arg(0).U32() + p0->Arg(1).U32();
-    buffer[1] = handle->Arg(2).U32() | handle->Arg(3).U64() << 32;
+    buffer[1] = 0;
+    buffer[2] = handle->Arg(2).U32();
+    buffer[3] = handle->Arg(3).U32();
     cbuf = std::bit_cast<AmdGpu::Buffer>(buffer);
     // Assign a binding to this sharp.
     return descriptors.Add(BufferResource{
@@ -498,6 +510,7 @@ void PatchImageInstruction(IR::Block& block, IR::Inst& inst, Info& info, Descrip
         .dword_offset = tsharp.dword_offset,
         .type = image.GetType(),
         .nfmt = static_cast<AmdGpu::NumberFormat>(image.GetNumberFmt()),
+        .is_atomic = IsAtomicImageInstruction(inst),
         .is_storage = IsImageStorageInstruction(inst),
         .is_depth = bool(inst_info.is_depth),
     });
