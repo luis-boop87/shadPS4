@@ -91,9 +91,9 @@ private:
     struct Request {
         Vulkan::Frame* frame;
         VideoOutPort* port;
-        s32 index;
         s64 flip_arg;
         u64 submit_tsc;
+        s32 index;
         bool eop;
 
         operator bool() const noexcept {

@@ -220,9 +220,9 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
     requests.push({
         .frame = frame,
         .port = port,
-        .index = index,
         .flip_arg = flip_arg,
         .submit_tsc = Libraries::Kernel::sceKernelReadTsc(),
+        .index = index,
         .eop = is_eop,
     });
 
