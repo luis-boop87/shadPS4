@@ -252,7 +252,6 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     requests.push({
         .frame = frame,
         .port = port,
-        .index = index,
         .flip_arg = flip_arg,
         .eop = is_eop,
     });

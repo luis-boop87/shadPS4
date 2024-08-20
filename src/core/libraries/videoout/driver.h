@@ -92,7 +92,6 @@ private:
     struct Request {
         Vulkan::Frame* frame;
         VideoOutPort* port;
-        s32 index;
         s64 flip_arg;
         bool eop;
 
